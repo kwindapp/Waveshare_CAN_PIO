@@ -73,6 +73,8 @@ struct ECUData {
   float throttle_dk;     // %
   float throttle_pedal;  // %
   float lambda;          // λ
+  bool lambda_valid;
+  uint16_t errors;
 } ecu;
 
 /***************************************************
@@ -113,11 +115,14 @@ bool btn_right_on = false;
 static lv_style_t style_rpm_label;
 
 /***************************************************
- * AIM full-packet reconstruction (35 bytes)
+ * WORKING AIM DECODER - PROVEN VERSION
  ***************************************************/
-static uint8_t aim_ring[35];
-static uint8_t aim_packet[35];
-static uint8_t aim_write_pos = 0;
+static uint8_t stream_buffer[100];
+static uint8_t stream_pos = 0;
+static uint32_t packet_count = 0;
+static uint32_t error_count = 0;
+static uint32_t can_rx_count = 0;
+static uint32_t aim_message_count = 0;
 
 // helpers: big-endian
 static inline int16_t S16BE_bytes(const uint8_t *p) {
@@ -127,123 +132,127 @@ static inline uint16_t U16BE_bytes(const uint8_t *p) {
   return (uint16_t(p[0]) << 8) | uint16_t(p[1]);
 }
 
-/***************************************************
- * HELPERS
- ***************************************************/
-const char* batt_color_hex(float v) {
-  static int state = 2;
-  switch (state) {
-    case 2:
-      if (v < BATT_GOOD_MIN - BATT_HYST) state = 1;
-      break;
-    case 1:
-      if (v >= BATT_GOOD_MIN + BATT_HYST) state = 2;
-      else if (v < BATT_WARN_MIN - BATT_HYST) state = 0;
-      break;
-    case 0:
-    default:
-      if (v >= BATT_WARN_MIN + BATT_HYST) state = 1;
-      break;
+bool verifyChecksum(const uint8_t *packet) {
+  uint8_t checksum = 0;
+  for (int i = 0; i < 34; i++) {
+    checksum += packet[i];
   }
-  return state == 2 ? COL_HEX_GOOD : (state == 1 ? COL_HEX_WARN : COL_HEX_BAD);
+  return checksum == packet[34];
 }
 
-const char* motor_color_hex(float c) {
-  static int state = 0;
-  switch (state) {
-    case 0:
-      if (c > MOTOR_GOOD_MAX + MOTOR_HYST) state = 1;
-      break;
-    case 1:
-      if (c <= MOTOR_GOOD_MAX - MOTOR_HYST) state = 0;
-      else if (c > MOTOR_WARN_MAX + MOTOR_HYST) state = 2;
-      break;
-    case 2:
-    default:
-      if (c <= MOTOR_WARN_MAX - MOTOR_HYST) state = 1;
-      break;
+void checkAlternativeValues(const uint8_t *packet) {
+  static bool batt_found = false;
+  static bool lambda_found = false;
+  
+  // Battery voltage - FIXED: bytes 12-13 with 0.005V/bit scaling
+  if (!batt_found) {
+    int16_t batt_pos12 = S16BE_bytes(&packet[12]); // Bytes 12-13
+    float battV = batt_pos12 * 0.005f; // 0.005V/bit scaling
+    if (battV > 8.0f && battV < 16.0f) {
+      ecu.batt = battV;
+      batt_found = true;
+      Serial.printf("BATT_FOUND: pos12-13 = %.2fV (0.005V/bit scaling)\n", ecu.batt);
+    }
   }
-  return state == 0 ? COL_HEX_GOOD : (state == 1 ? COL_HEX_WARN : COL_HEX_BAD);
+  
+  // Lambda - FIXED: bytes 18-19 with 0.005 scaling
+  if (!lambda_found) {
+    uint16_t lambda_pos18 = U16BE_bytes(&packet[18]); // Bytes 18-19
+    
+    // Try different scaling factors
+    float lambda_005 = lambda_pos18 * 0.005f;  // Working scaling
+    
+    if (packet_count == 0) {
+      Serial.printf("LAMBDA_SCALING: pos18-19=0x%04X -> 0.005=%.3f\n", lambda_pos18, lambda_005);
+    }
+    
+    // Use 0.005 scaling for lambda (gives ~1.050)
+    if (lambda_005 >= 0.5f && lambda_005 <= 2.0f) {
+      ecu.lambda = lambda_005;
+      ecu.lambda_valid = true;
+      lambda_found = true;
+      Serial.printf("LAMBDA_FOUND: pos18-19 = %.3f (0.005 scaling)\n", ecu.lambda);
+    }
+  }
 }
 
-/***************************************************
- * AIM PACKET → ECU DECODE
- ***************************************************/
-void aim_decode_packet_to_ecu(const uint8_t *p) {
-  // RPM (0–1)
-  uint16_t rpm_raw = U16BE_bytes(&p[0]);
+void processAIMPacket(const uint8_t *packet) {
+  if (!verifyChecksum(packet)) {
+    error_count++;
+    return;
+  }
+
+  if (packet[30] != 0x1E || packet[31] != 0xFC || packet[32] != 0xFB || packet[33] != 0xFA) {
+    error_count++;
+    return;
+  }
+
+  // RPM (bytes 0-1) - 1 RPM/bit
+  uint16_t rpm_raw = U16BE_bytes(&packet[0]);
   if (rpm_raw > MAX_RPM) rpm_raw = MAX_RPM;
   ecu.rpm = rpm_raw;
   lastRpmUpdateMs = millis();
 
-  // Motor temp / "Water" (8–9) 0.1°C/bit
-  float waterC = S16BE_bytes(&p[8]) * 0.1f;
-  ecu.motor = (ecu.motor < 0.01f)
-                ? waterC
-                : ecu.motor + SMOOTH_ALPHA_MOTOR * (waterC - ecu.motor);
-
-  // Battery (12–13)
-  int16_t batt_raw = S16BE_bytes(&p[12]);
-  float battV = (batt_raw * 5.0f / 1024.0f); // voltage at ADC pin
-  battV *= 3.0f;                             // your divider guess
-  ecu.batt = (ecu.batt < 0.01f)
-               ? battV
-               : ecu.batt + SMOOTH_ALPHA_BATT * (battV - ecu.batt);
-
-  // Throttle (14–15) 0.1% per bit
-  float thr = U16BE_bytes(&p[14]) * 0.1f;
-  ecu.throttle_dk     = thr;
-  ecu.throttle_pedal  = thr;
-
-  // Lambda (22–23) 0.001 λ per bit
-  ecu.lambda = U16BE_bytes(&p[22]) * 0.001f;
-}
-
-/***************************************************
- * AIM PACKET ASSEMBLER FOR ID 0x770
- ***************************************************/
-static uint32_t can_rx_count = 0;
-
-void decodeAIM_770(const twai_message_t &m) {
-  const uint8_t *data = m.data;
-
-  for (int i = 0; i < m.data_length_code; ++i) {
-    uint8_t b = data[i];
-
-    // write byte into 35-byte ring buffer
-    aim_ring[aim_write_pos] = b;
-    int idx_last  = aim_write_pos;
-    int idx_prev1 = (idx_last + 35 - 1) % 35;
-    int idx_prev2 = (idx_last + 35 - 2) % 35;
-    aim_write_pos = (aim_write_pos + 1) % 35;
-
-    // look for marker sequence: FC, FB, FA (bytes 31,32,33)
-    if (aim_ring[idx_prev2] == 0xFC &&
-        aim_ring[idx_prev1] == 0xFB &&
-        aim_ring[idx_last]  == 0xFA) {
-
-      int start_idx = (idx_prev2 + 35 - 31) % 35;
-
-      // rebuild ordered packet 0..34
-      for (int j = 0; j < 35; ++j) {
-        int src = (start_idx + j) % 35;
-        aim_packet[j] = aim_ring[src];
-      }
-
-      if (can_rx_count < 5) {
-        Serial.print("AIM PACKET RAW: ");
-        for (int j = 0; j < 35; ++j) {
-          if (aim_packet[j] < 0x10) Serial.print("0");
-          Serial.print(aim_packet[j], HEX);
-          Serial.print(" ");
-        }
-        Serial.println();
-      }
-
-      aim_decode_packet_to_ecu(aim_packet);
-    }
+  // Water Temperature (bytes 8-9) - 0.1°C/bit
+  int16_t temp_raw = S16BE_bytes(&packet[8]);
+  float waterC = temp_raw * 0.1f;
+  if (waterC > -10 && waterC < 150) {
+    ecu.motor = (ecu.motor < 0.01f)
+                  ? waterC
+                  : ecu.motor + SMOOTH_ALPHA_MOTOR * (waterC - ecu.motor);
   }
 
+  // Throttle Angle (bytes 14-15) - 0.1%/bit
+  uint16_t throttle_raw = U16BE_bytes(&packet[14]);
+  float throttle = throttle_raw * 0.1f;
+  if (throttle >= 0 && throttle <= 100) {
+    ecu.throttle_dk = throttle;
+    ecu.throttle_pedal = throttle;
+  }
+
+  // Errors (bytes 28-29)
+  ecu.errors = U16BE_bytes(&packet[28]);
+
+  // Find battery and lambda using proven method
+  checkAlternativeValues(packet);
+
+  packet_count++;
+}
+
+void decodeAIM_770(const twai_message_t &m) {
+  aim_message_count++;
+  const uint8_t *data = m.data;
+  uint8_t data_length = m.data_length_code;
+
+  // Add this CAN message to our stream buffer
+  for (int i = 0; i < data_length; i++) {
+    stream_buffer[stream_pos] = data[i];
+    stream_pos = (stream_pos + 1) % 100;
+  }
+
+  // Look for the header pattern in the stream buffer
+  for (int start = 0; start < 100; start++) {
+    int idx30 = (start + 30) % 100;
+    int idx31 = (start + 31) % 100;
+    int idx32 = (start + 32) % 100;
+    int idx33 = (start + 33) % 100;
+    
+    if (stream_buffer[idx30] == 0x1E &&
+        stream_buffer[idx31] == 0xFC &&
+        stream_buffer[idx32] == 0xFB &&
+        stream_buffer[idx33] == 0xFA) {
+      
+      // Found header! Extract 35-byte packet
+      uint8_t packet[35];
+      for (int j = 0; j < 35; j++) {
+        packet[j] = stream_buffer[(start + j) % 100];
+      }
+      
+      processAIMPacket(packet);
+      break;
+    }
+  }
+  
   can_rx_count++;
 }
 
@@ -376,13 +385,11 @@ void create_sim_ui() {
   lv_bar_set_range(rpm_bar, 0, 800);   // 0–8000 rpm -> /10
   lv_bar_set_value(rpm_bar, 0, LV_ANIM_OFF);
 
-  // slower animation for smoother motion
   // slower animation for smoother motion (LVGL 8.x)
-static lv_style_t style_bar_anim;
-lv_style_init(&style_bar_anim);
-lv_style_set_anim_time(&style_bar_anim, 150);   // ms
-lv_obj_add_style(rpm_bar, &style_bar_anim, LV_PART_INDICATOR);
-
+  static lv_style_t style_bar_anim;
+  lv_style_init(&style_bar_anim);
+  lv_style_set_anim_time(&style_bar_anim, 150);   // ms
+  lv_obj_add_style(rpm_bar, &style_bar_anim, LV_PART_INDICATOR);
 
   lv_coord_t bar_width = LV_HOR_RES - 30;
   if (bar_width < 200) bar_width = 200;
@@ -620,7 +627,9 @@ void setup() {
   ecu.motor          = 0.0f;
   ecu.throttle_dk    = 0.0f;
   ecu.throttle_pedal = 0.0f;
-  ecu.lambda         = 0.87f;
+  ecu.lambda         = 0.0f;
+  ecu.lambda_valid   = false;
+  ecu.errors         = 0;
 }
 
 /***************************************************
@@ -652,7 +661,8 @@ void loop() {
     ecu.motor = tm;
     ecu.throttle_dk    = random(80, 80);
     ecu.throttle_pedal = ecu.throttle_dk;
-    ecu.lambda         = 0.90f; // 0.85–0.95 test
+    ecu.lambda         = 1.00f; // Use 1.00 for testing
+    ecu.lambda_valid   = true;
   } else {
     if (can_ok) {
       twai_message_t m;
