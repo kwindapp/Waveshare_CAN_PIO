@@ -18,11 +18,7 @@
 
 using namespace esp_panel::drivers;
 using namespace esp_panel::board;
-// Combined Buttons - Marker Byte 3 (0xFA) control
-#define BTN_COMBO_EMERGENCY_STOP  0x01  // Bit 0: Emergency Stop
-#define BTN_COMBO_CALIBRATION     0x02  // Bit 1: Calibration Mode
-#define BTN_COMBO_LOGGING         0x04  // Bit 2: Data Logging
-#define BTN_COMBO_TEST_MODE       0x08  // Bit 3: Test Mode
+
 /***************************************************
  * BUTTON CONFIGURATION - LINK TO MARKER BITS
  ***************************************************/
@@ -32,7 +28,7 @@ using namespace esp_panel::board;
 #define BTN_LEFT_MAP_SWITCH       0x04  // Bit 2: Map Switching
 #define BTN_LEFT_TRACTION_OFF     0x08  // Bit 3: Traction Control Off
 
-// Right Button Functions - Marker Byte 2 (0xFB) control  
+// Right Button Functions - Marker Byte 2 (0xFB) control
 #define BTN_RIGHT_ANTI_LAG        0x01  // Bit 0: Anti-Lag System
 #define BTN_RIGHT_FLAT_SHIFT      0x02  // Bit 1: Flat Shift
 #define BTN_RIGHT_AUTO_BLIP       0x04  // Bit 2: Auto Blip
@@ -49,11 +45,12 @@ using namespace esp_panel::board;
  ***************************************************/
 #define TEST_RPM_MODE        1        // 1 = fake RPM, 0 = real CAN
 #define ESPNOW_WIFI_CHANNEL  1
+
 /***************************************************
  * BUTTON-CONTROLLED MARKER BYTES
  ***************************************************/
 uint8_t custom_marker_1 = 0xFC;  // Default marker byte 1
-uint8_t custom_marker_2 = 0xFB;  // Default marker byte 2  
+uint8_t custom_marker_2 = 0xFB;  // Default marker byte 2
 uint8_t custom_marker_3 = 0xFA;  // Default marker byte 3
 
 /***************************************************
@@ -79,12 +76,14 @@ struct ECUData {
 #define TEMP_SMOOTHING     0.1f
 #define VOLTAGE_SMOOTHING  0.2f
 #define LAMBDA_SMOOTHING   0.2f
+
 /***************************************************
  * BUTTON STATE TRACKING
  ***************************************************/
-uint8_t left_button_flags = 0;
+uint8_t left_button_flags  = 0;
 uint8_t right_button_flags = 0;
 uint8_t combo_button_flags = 0;
+
 static lv_obj_t *btn_left;
 static lv_obj_t *btn_right;
 static lv_obj_t *btn_left_label;
@@ -93,7 +92,6 @@ static lv_obj_t *btn_right_label;
 bool btn_left_on  = false;
 bool btn_right_on = false;
 
-
 /***************************************************
  * BAR SCALING — FULL BAR AT THIS RPM
  ***************************************************/
@@ -101,9 +99,13 @@ bool btn_right_on = false;
 
 const uint32_t UI_UPDATE_INTERVAL_MS = 100;
 
+/***************************************************
+ * INLINE HELPERS
+ ***************************************************/
 static inline int16_t S16BE(const uint8_t *p) {
   return (int16_t)((uint16_t(p[0]) << 8) | uint16_t(p[1]));
 }
+
 static inline uint16_t U16BE(const uint8_t *p) {
   return (uint16_t(p[0]) << 8) | uint16_t(p[1]);
 }
@@ -117,8 +119,8 @@ bool isValidLambda(float l)  { return (l >= 0.5f && l <= 2.0f); }
  * ESP-NOW
  ***************************************************/
 uint8_t espnow_broadcast_addr[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-static uint16_t espnow_last_rpm = 0;
-static uint32_t espnow_last_send_ms = 0;
+static uint16_t espnow_last_rpm      = 0;
+static uint32_t espnow_last_send_ms  = 0;
 
 const uint32_t ESPNOW_MIN_INTERVAL_MS = 50;
 
@@ -144,12 +146,14 @@ void init_espnow() {
 void espnow_send_rpm(uint16_t rpm) {
   uint32_t now = millis();
   if (now - espnow_last_send_ms < ESPNOW_MIN_INTERVAL_MS &&
-      rpm == espnow_last_rpm) return;
+      rpm == espnow_last_rpm) {
+    return;
+  }
 
   espnow_last_send_ms = now;
   espnow_last_rpm     = rpm;
 
-  uint8_t payload[4] = {0x00,0x00, uint8_t(rpm>>8), uint8_t(rpm&0xFF)};
+  uint8_t payload[4] = {0x00, 0x00, uint8_t(rpm >> 8), uint8_t(rpm & 0xFF)};
   esp_now_send(espnow_broadcast_addr, payload, 4);
 }
 
@@ -162,16 +166,16 @@ void processECUData_770(const twai_message_t &msg) {
 
   // ---- BATTERY ----
   if (d[0]==0x00 && d[2]==0x00 && d[3]==0x00 &&
-      d[6]==0x00 && d[7]==0x00 && (d[4]!=0x00||d[5]!=0x00))
-  {
+      d[6]==0x00 && d[7]==0x00 && (d[4]!=0x00||d[5]!=0x00)) {
     float newBat = S16BE(&d[4]) * 0.005f;
     if (isValidBatt(newBat)) {
-      if (ecu.battery_voltage == 0.0f)
+      if (ecu.battery_voltage == 0.0f) {
         ecu.battery_voltage = newBat;
-      else
+      } else {
         ecu.battery_voltage += VOLTAGE_SMOOTHING * (newBat - ecu.battery_voltage);
+      }
 
-      ecu.data_valid = true;
+      ecu.data_valid  = true;
       ecu.last_update = now;
     }
     return;
@@ -179,8 +183,8 @@ void processECUData_770(const twai_message_t &msg) {
 
   // ---- ERRORS ----
   if (d[0]==0x00 && d[1]==0x00 && d[5]==0x41 && d[6]==0x1E && d[7]==0xFC) {
-    ecu.errors = d[4];
-    ecu.data_valid = true;
+    ecu.errors      = d[4];
+    ecu.data_valid  = true;
     ecu.last_update = now;
     return;
   }
@@ -189,10 +193,13 @@ void processECUData_770(const twai_message_t &msg) {
   if (d[0]==0xFB && d[1]==0xFA) {
     float new_lambda = d[2] / 100.0f;
     if (isValidLambda(new_lambda)) {
-      if (ecu.lambda == 0.0f) ecu.lambda = new_lambda;
-      else ecu.lambda += LAMBDA_SMOOTHING * (new_lambda - ecu.lambda);
+      if (ecu.lambda == 0.0f) {
+        ecu.lambda = new_lambda;
+      } else {
+        ecu.lambda += LAMBDA_SMOOTHING * (new_lambda - ecu.lambda);
+      }
 
-      ecu.data_valid = true;
+      ecu.data_valid  = true;
       ecu.last_update = now;
     }
     return;
@@ -200,39 +207,48 @@ void processECUData_770(const twai_message_t &msg) {
 
   // ---- RPM + TEMP ----
   if (d[4]==0 && d[5]==0 && d[6]==0 && d[7]==0 &&
-      (d[2]!=0 || d[3]!=0))
-  {
+      (d[2]!=0 || d[3]!=0)) {
+
     uint16_t new_rpm = U16BE(&d[0]);
-    float new_temp = S16BE(&d[2]) * 0.1f;
+    float    new_temp = S16BE(&d[2]) * 0.1f;
 
     if (isValidRPM(new_rpm)) {
-      if (ecu.rpm == 0) ecu.rpm = new_rpm;
-      else ecu.rpm += RPM_SMOOTHING * (new_rpm - ecu.rpm);
+      if (ecu.rpm == 0) {
+        ecu.rpm = new_rpm;
+      } else {
+        ecu.rpm += RPM_SMOOTHING * (new_rpm - ecu.rpm);
+      }
       espnow_send_rpm(ecu.rpm);
     }
 
     if (isValidTemp(new_temp)) {
-      if (ecu.water_temp == 0.0f) ecu.water_temp = new_temp;
-      else ecu.water_temp += TEMP_SMOOTHING * (new_temp - ecu.water_temp);
+      if (ecu.water_temp == 0.0f) {
+        ecu.water_temp = new_temp;
+      } else {
+        ecu.water_temp += TEMP_SMOOTHING * (new_temp - ecu.water_temp);
+      }
     }
 
-    ecu.data_valid = true;
+    ecu.data_valid  = true;
     ecu.last_update = now;
     return;
   }
 
   // ---- ONLY RPM ----
   if (d[2]==0 && d[3]==0 && d[4]==0 && d[5]==0 &&
-      d[6]==0 && d[7]==0)
-  {
+      d[6]==0 && d[7]==0) {
+
     uint16_t new_rpm = U16BE(&d[0]);
 
     if (isValidRPM(new_rpm)) {
-      if (ecu.rpm == 0) ecu.rpm = new_rpm;
-      else ecu.rpm += RPM_SMOOTHING * (new_rpm - ecu.rpm);
+      if (ecu.rpm == 0) {
+        ecu.rpm = new_rpm;
+      } else {
+        ecu.rpm += RPM_SMOOTHING * (new_rpm - ecu.rpm);
+      }
       espnow_send_rpm(ecu.rpm);
 
-      ecu.data_valid = true;
+      ecu.data_valid  = true;
       ecu.last_update = millis();
     }
     return;
@@ -242,6 +258,7 @@ void processECUData_770(const twai_message_t &msg) {
 /***************************************************
  * LVGL OBJECTS
  ***************************************************/
+static lv_obj_t *label_brand;
 static lv_obj_t *label_title;
 static lv_obj_t *label_rpm;
 static lv_obj_t *rpm_bar;
@@ -249,50 +266,51 @@ static lv_obj_t *label_batt;
 static lv_obj_t *label_temp;
 static lv_obj_t *label_lambda;
 static lv_obj_t *label_status;
+
 /***************************************************
  * BUTTON EVENT HANDLERS WITH MARKER CONTROL
  ***************************************************/
 static void update_marker_bytes() {
   // Marker Byte 1 (0xFC) - Left Button Functions
-  custom_marker_1 = 0xFC;  // Base value
-  custom_marker_1 |= left_button_flags;  // Add button flags
-  
-  // Marker Byte 2 (0xFB) - Right Button Functions  
-  custom_marker_2 = 0xFB;  // Base value
+  custom_marker_1 = 0xFC;                 // Base value
+  custom_marker_1 |= left_button_flags;   // Add button flags
+
+  // Marker Byte 2 (0xFB) - Right Button Functions
+  custom_marker_2 = 0xFB;                 // Base value
   custom_marker_2 |= right_button_flags;  // Add button flags
-  
+
   // Marker Byte 3 (0xFA) - Combined Button Functions
-  custom_marker_3 = 0xFA;  // Base value
+  custom_marker_3 = 0xFA;                 // Base value
   custom_marker_3 |= combo_button_flags;  // Add combo flags
-  
-  Serial.printf("[MARKERS] Updated: 0x%02X 0x%02X 0x%02X\n", 
+
+  Serial.printf("[MARKERS] Updated: 0x%02X 0x%02X 0x%02X\n",
                 custom_marker_1, custom_marker_2, custom_marker_3);
 }
 
 static void btn_left_event_handler(lv_event_t * e) {
   lv_obj_t * btn = lv_event_get_target(e);
   btn_left_on = lv_obj_has_state(btn, LV_STATE_CHECKED);
-  
+
   if (btn_left_on) {
     // Left button pressed - activate functions
     left_button_flags |= BTN_LEFT_SPORT_MODE;  // Example: Sport mode
     lv_label_set_text(btn_left_label, "Boom");
   } else {
-    // Left button released - deactivate functions  
+    // Left button released - deactivate functions
     left_button_flags &= ~BTN_LEFT_SPORT_MODE;
     lv_label_set_text(btn_left_label, "mode 1");
   }
-  
+
   update_marker_bytes();
-  
-  Serial.printf("[BTN] Left: %s, Flags: 0x%02X\n", 
+
+  Serial.printf("[BTN] Left: %s, Flags: 0x%02X\n",
                 btn_left_on ? "ON" : "OFF", left_button_flags);
 }
 
 static void btn_right_event_handler(lv_event_t * e) {
   lv_obj_t * btn = lv_event_get_target(e);
   btn_right_on = lv_obj_has_state(btn, LV_STATE_CHECKED);
-  
+
   if (btn_right_on) {
     // Right button pressed - activate functions
     right_button_flags |= BTN_RIGHT_ANTI_LAG;  // Example: Anti-lag
@@ -300,11 +318,11 @@ static void btn_right_event_handler(lv_event_t * e) {
   } else {
     // Right button released - deactivate functions
     right_button_flags &= ~BTN_RIGHT_ANTI_LAG;
-    lv_label_set_text(btn_right_label, "mode 2");  
+    lv_label_set_text(btn_right_label, "mode 2");
   }
-  
+
   update_marker_bytes();
-  
+
   Serial.printf("[BTN] Right: %s, Flags: 0x%02X\n",
                 btn_right_on ? "ON" : "OFF", right_button_flags);
 }
@@ -315,7 +333,7 @@ static void btn_right_event_handler(lv_event_t * e) {
 void check_combination_buttons() {
   static bool last_combo_state = false;
   bool current_combo_state = (btn_left_on && btn_right_on);
-  
+
   if (current_combo_state != last_combo_state) {
     if (current_combo_state) {
       // Both buttons pressed - activate combo functions
@@ -326,12 +344,15 @@ void check_combination_buttons() {
       combo_button_flags &= ~BTN_COMBO_EMERGENCY_STOP;
       Serial.println("[COMBO] Emergency stop deactivated");
     }
-    
+
     update_marker_bytes();
     last_combo_state = current_combo_state;
   }
 }
 
+/***************************************************
+ * CHECKSUM (if needed elsewhere)
+ ***************************************************/
 bool verifyChecksum(const uint8_t *packet) {
   uint8_t checksum = 0;
   for (int i = 0; i < 34; i++) {
@@ -348,12 +369,13 @@ void create_dashboard_ui() {
 
   lv_obj_set_style_bg_color(scr, lv_color_hex(0x050608), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-// ---- TITLE ----
-  label_title = lv_label_create(scr);
-  lv_obj_set_style_text_font(label_title, &ui_font_t20, 0);
-  lv_obj_set_style_text_color(label_title, lv_color_hex(0xAAAAAA), 0);
-  lv_label_set_text(label_title, "RAUH Welt BEGRIFF");
-  lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 30);
+
+  // ---- BRAND ----
+  label_brand = lv_label_create(scr);
+  lv_obj_set_style_text_font(label_brand, &ui_font_t20, 0);
+  lv_obj_set_style_text_color(label_brand, lv_color_hex(0xAAAAAA), 0);
+  lv_label_set_text(label_brand, "RAUH Welt BEGRIFF");
+  lv_obj_align(label_brand, LV_ALIGN_TOP_MID, 0, 30);
 
   // ---- TITLE ----
   label_title = lv_label_create(scr);
@@ -381,7 +403,6 @@ void create_dashboard_ui() {
   lv_obj_set_style_border_width(rpm_cont, 1, 0);
   lv_obj_set_style_border_color(rpm_cont, lv_color_hex(0x303848), 0);
 
-  // Padding so bar fills inside the box
   lv_obj_set_style_pad_left(rpm_cont, 8, 0);
   lv_obj_set_style_pad_right(rpm_cont, 8, 0);
   lv_obj_set_style_pad_top(rpm_cont, 6, 0);
@@ -398,8 +419,7 @@ void create_dashboard_ui() {
   rpm_bar = lv_bar_create(rpm_cont);
   lv_bar_set_range(rpm_bar, 0, RPM_BAR_MAX_RPM_DISPLAY);
 
-  // bar fills the inner width of rpm_cont
-  lv_obj_set_width(rpm_bar, LV_PCT(100));   // 100% of inner width
+  lv_obj_set_width(rpm_bar, LV_PCT(100));
   lv_obj_set_height(rpm_bar, 18);
   lv_obj_align(rpm_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
 
@@ -410,7 +430,6 @@ void create_dashboard_ui() {
   lv_obj_set_style_bg_color(rpm_bar, lv_color_hex(0x00FF5A), LV_PART_INDICATOR);
   lv_obj_set_style_bg_opa(rpm_bar, LV_OPA_TRANSP, LV_PART_INDICATOR);  // start hidden
 
-  // start at 0 so nothing is shown until we get data
   lv_bar_set_value(rpm_bar, 0, LV_ANIM_OFF);
 
   // ========== LOWER INFO ==========
@@ -429,7 +448,7 @@ void create_dashboard_ui() {
   label_lambda = lv_label_create(scr);
   lv_obj_set_style_text_font(label_lambda, &ui_font_Hollow85, 0);
   lv_obj_set_style_text_color(label_lambda, lv_color_hex(0x8D9699), 0);
-  lv_label_set_text(label_lambda, "Lamda: -.-");
+  lv_label_set_text(label_lambda, "Lambda: -.-");
   lv_obj_align(label_lambda, LV_ALIGN_BOTTOM_LEFT, 20, -35);
 
   label_status = lv_label_create(scr);
@@ -438,7 +457,7 @@ void create_dashboard_ui() {
   lv_label_set_text(label_status, "CAN: WAIT");
   lv_obj_align(label_status, LV_ALIGN_BOTTOM_RIGHT, -110, -55);
 
-  // BUTTONS WITH EVENT HANDLERS
+  // LEFT BUTTON
   btn_left = lv_btn_create(scr);
   lv_obj_add_flag(btn_left, LV_OBJ_FLAG_CHECKABLE);
   lv_obj_set_size(btn_left, 120, 60);
@@ -448,12 +467,14 @@ void create_dashboard_ui() {
   lv_obj_set_style_bg_opa(btn_left, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(btn_left, 10, LV_PART_MAIN);
   lv_obj_add_event_cb(btn_left, btn_left_event_handler, LV_EVENT_VALUE_CHANGED, NULL);
+
   btn_left_label = lv_label_create(btn_left);
   lv_label_set_text(btn_left_label, "mode 1");
   lv_obj_set_style_text_font(btn_left_label, &ui_font_Hollow38, 0);
   lv_obj_center(btn_left_label);
 
-btn_right = lv_btn_create(scr);
+  // RIGHT BUTTON
+  btn_right = lv_btn_create(scr);
   lv_obj_add_flag(btn_right, LV_OBJ_FLAG_CHECKABLE);
   lv_obj_set_size(btn_right, 120, 60);
   lv_obj_align(btn_right, LV_ALIGN_RIGHT_MID, -20, -50);
@@ -462,29 +483,23 @@ btn_right = lv_btn_create(scr);
   lv_obj_set_style_bg_opa(btn_right, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(btn_right, 10, LV_PART_MAIN);
   lv_obj_add_event_cb(btn_right, btn_right_event_handler, LV_EVENT_VALUE_CHANGED, NULL);
+
   btn_right_label = lv_label_create(btn_right);
   lv_label_set_text(btn_right_label, "mode 2");
   lv_obj_set_style_text_font(btn_right_label, &ui_font_Hollow38, 0);
   lv_obj_center(btn_right_label);
-
-
 }
-
-
-
-
-
 
 /***************************************************
  * UPDATE UI
  ***************************************************/
 void update_dashboard_ui() {
   static uint16_t last_rpm_disp = 0;
-  static float last_batt = -1;
-  static float last_temp = -1000;
-  static float last_lambda = -1;
-  static uint8_t last_err = 255;
-  static uint8_t last_band = 255;
+  static float    last_batt     = -1;
+  static float    last_temp     = -1000;
+  static float    last_lambda   = -1;
+  static uint8_t  last_err      = 255;
+  static uint8_t  last_band     = 255;
 
   char buf[32];
 
@@ -497,8 +512,9 @@ void update_dashboard_ui() {
     last_rpm_disp = rpm_disp;
 
     uint16_t bar_val = rpm_disp;
-    if (bar_val > RPM_BAR_MAX_RPM_DISPLAY)
+    if (bar_val > RPM_BAR_MAX_RPM_DISPLAY) {
       bar_val = RPM_BAR_MAX_RPM_DISPLAY;
+    }
 
     lv_bar_set_value(rpm_bar, bar_val, LV_ANIM_OFF);
 
@@ -515,12 +531,13 @@ void update_dashboard_ui() {
     else                      band = 2;
 
     if (band != last_band) {
-      if (band == 0)
+      if (band == 0) {
         lv_obj_set_style_bg_color(rpm_bar, lv_color_hex(0x00FF40), LV_PART_INDICATOR);
-      else if (band == 1)
+      } else if (band == 1) {
         lv_obj_set_style_bg_color(rpm_bar, lv_color_hex(0xFFD000), LV_PART_INDICATOR);
-      else
+      } else {
         lv_obj_set_style_bg_color(rpm_bar, lv_color_hex(0xFF0000), LV_PART_INDICATOR);
+      }
 
       last_band = band;
     }
@@ -542,7 +559,7 @@ void update_dashboard_ui() {
 
   // ---- Lambda ----
   if (fabsf(ecu.lambda - last_lambda) > 0.01f) {
-    snprintf(buf, sizeof(buf), "Lam: %.2f", ecu.lambda);
+    snprintf(buf, sizeof(buf), "Lambda: %.2f", ecu.lambda);
     lv_label_set_text(label_lambda, buf);
     last_lambda = ecu.lambda;
   }
@@ -583,7 +600,7 @@ void setup() {
 
   init_espnow();
 
-  ecu = {0,0,0,0,0,false,0};
+  ecu = {0, 0, 0, 0, 0, false, 0};
 }
 
 /***************************************************
@@ -594,14 +611,14 @@ void loop() {
 
 #if TEST_RPM_MODE
   static uint32_t last_test = 0;
-  static uint16_t fake_rpm = 1000;
+  static uint16_t fake_rpm  = 1000;
 
   if (millis() - last_test > 1000) {
     last_test = millis();
 
-    ecu.data_valid = true;
+    ecu.data_valid  = true;
     ecu.last_update = millis();
-    ecu.rpm = fake_rpm;
+    ecu.rpm         = fake_rpm;
 
     espnow_send_rpm(fake_rpm);
 
@@ -610,16 +627,20 @@ void loop() {
   }
 #else
   twai_message_t msg;
-  while (twai_receive(&msg,0) == ESP_OK) {
-    if (msg.identifier == 0x770)
+  while (twai_receive(&msg, 0) == ESP_OK) {
+    if (msg.identifier == 0x770) {
       processECUData_770(msg);
+    }
   }
 #endif
 
   if (ecu.data_valid && millis() - ecu.last_update > 2000) {
     ecu.data_valid = false;
-    ecu.rpm = 0;
+    ecu.rpm        = 0;
   }
+
+  // Check combined button state each loop
+  check_combination_buttons();
 
   if (millis() - last_ui_update > UI_UPDATE_INTERVAL_MS) {
     lvgl_port_lock(-1);
